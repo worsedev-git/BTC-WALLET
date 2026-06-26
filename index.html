@@ -156,6 +156,14 @@
   details.setup p{color:var(--ink-mut); font-size:12.5px; line-height:1.55; margin:11px 0}
   details.setup p b{color:var(--ink)}
   .note{font-size:11.5px; color:var(--ink-faint)!important}
+  textarea{width:100%; min-height:84px; resize:vertical; background:var(--honeydew); border:1.5px solid rgba(28,30,28,.1);
+    color:var(--ink); font-family:var(--mono); font-size:12px; line-height:1.5; padding:12px 13px; border-radius:12px;
+    word-break:break-all; margin-bottom:12px; transition:border-color .2s, box-shadow .2s}
+  textarea:focus{outline:none; border-color:var(--green-ink); box-shadow:0 0 0 3px rgba(31,157,68,.16)}
+  .dangerzone{display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:14px;
+    border-top:1px solid rgba(28,30,28,.1); padding-top:16px}
+  .btn.danger{background:#fff; color:#c23b22; box-shadow:0 4px 0 rgba(194,59,34,.25), 0 8px 14px -8px rgba(194,59,34,.3)}
+  .btn.danger:active{transform:translateY(3px); box-shadow:0 1px 0 rgba(194,59,34,.25)}
   @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(31,157,68,.45)}70%{box-shadow:0 0 0 8px rgba(31,157,68,0)}100%{box-shadow:0 0 0 0 rgba(31,157,68,0)}}
 
   /* activity list */
@@ -229,6 +237,7 @@
     <button role="tab" data-tab="overview" aria-selected="true">Overview</button>
     <button role="tab" data-tab="activity" aria-selected="false">Log</button>
     <button role="tab" data-tab="projections" aria-selected="false">Projections</button>
+    <button role="tab" data-tab="data" aria-selected="false">Data</button>
   </nav>
 
   <main id="view"></main>
@@ -270,6 +279,7 @@ async function load(){
   }
   state.loaded=true; render();
   if(state.px.source==="live") refreshLive(true);   /* silent auto-refresh if previously opted in */
+  startAuto();
 }
 async function save(which){
   const m={tx:[K.tx,state.tx],px:[K.px,state.px],pj:[K.pj,state.pj],cfg:[K.cfg,state.cfg]}[which];
@@ -306,6 +316,12 @@ async function refreshLive(silent){
   if(!silent && stamp){
     stamp.innerHTML='<span class="live" style="background:#b59a00"></span>Couldn’t reach the price services — this is normal inside the Claude preview. Host the file (or type prices manually) and live updates will work.';
   }
+}
+let autoTimer=null;
+function startAuto(){
+  if(autoTimer) return;
+  autoTimer=setInterval(()=>{ if(state.px.source==="live" && document.visibilityState==="visible") refreshLive(true); }, 120000);
+  document.addEventListener("visibilitychange",()=>{ if(document.visibilityState==="visible" && state.px.source==="live") refreshLive(true); });
 }
 
 /* math */
@@ -558,12 +574,107 @@ function projections(){
   bind("rBTC","BTC","ret"); bind("cBTC","BTC","contrib"); bind("rNVDA","NVDA","ret"); bind("cNVDA","NVDA","contrib");
 }
 
+/* backup · restore · cleanup */
+const b64enc=s=>btoa(unescape(encodeURIComponent(s)));
+const b64dec=s=>decodeURIComponent(escape(atob(s)));
+function exportObj(){ return {app:"stack", v:1, exportedAt:new Date().toISOString(), tx:state.tx, px:state.px, pj:state.pj, cfg:state.cfg}; }
+function exportCode(){ return b64enc(JSON.stringify(exportObj())); }
+function importData(raw){
+  raw=(raw||"").trim(); if(!raw) return false;
+  let json; try{ json=b64dec(raw); }catch(e){ json=raw; }
+  let data; try{ data=JSON.parse(json); }catch(e){ try{ data=JSON.parse(raw); }catch(e2){ return false; } }
+  if(!data || typeof data!=="object") return false;
+  if(Array.isArray(data.tx)) state.tx=data.tx.filter(t=>t&&t.asset&&t.type&&isFinite(t.usd)&&isFinite(t.qty)).map(t=>({id:t.id||Date.now()+Math.random(),date:t.date,asset:t.asset,type:t.type,usd:+t.usd,qty:+t.qty}));
+  if(data.px && typeof data.px==="object") state.px=Object.assign({BTC:null,NVDA:null,updatedAt:null,source:null},data.px);
+  if(data.pj && typeof data.pj==="object") state.pj=data.pj;
+  if(data.cfg && typeof data.cfg==="object") state.cfg=data.cfg;
+  save("tx"); save("px"); save("pj"); save("cfg"); return true;
+}
+function downloadBackup(){
+  const blob=new Blob([JSON.stringify(exportObj(),null,2)],{type:"application/json"});
+  const url=URL.createObjectURL(blob), a=document.createElement("a");
+  a.href=url; a.download="stack-backup-"+new Date().toISOString().slice(0,10)+".json"; document.body.appendChild(a); a.click();
+  a.remove(); setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
+function dedupeTx(){
+  const seen=new Set(), kept=[];
+  for(const t of state.tx){ const k=[t.date,t.asset,t.type,t.usd,t.qty].join("|");
+    if(seen.has(k)) continue; seen.add(k); kept.push(t); }
+  const removed=state.tx.length-kept.length; state.tx=kept; if(removed) save("tx"); return removed;
+}
+
+function dataTab(){
+  const code=exportCode(), n=state.tx.length;
+  const v=document.getElementById("view");
+  v.innerHTML=`<div class="grid">
+    <div class="tile span2"><span class="fold"></span>
+      <div class="thead"><span class="grip"></span><h2 class="tt">Back up your data</h2></div>
+      <p class="hint">Your data lives only in this browser. Copy this code (or download the file) and keep it somewhere safe — it's how you move everything to another device or recover it later.</p>
+      <textarea id="bkCode" readonly>${code}</textarea>
+      <div class="pricebtns">
+        <button class="btn" id="copyBk">Copy backup code</button>
+        <button class="btn ghost" id="dlBk">Download file</button>
+      </div></div>
+    <div class="tile span2"><span class="fold"></span>
+      <div class="thead"><span class="grip"></span><h2 class="tt">Restore</h2></div>
+      <p class="hint">Paste a backup code here (or load a file) to bring your data onto this device. This replaces whatever is currently saved here.</p>
+      <textarea id="rsCode" placeholder="paste backup code"></textarea>
+      <div class="pricebtns">
+        <button class="btn" id="rsBtn">Restore from code</button>
+        <label class="btn ghost" for="rsFile" style="text-align:center">Restore from file
+          <input type="file" id="rsFile" accept=".json,.txt,application/json,text/plain" style="display:none"></label>
+      </div>
+      <div class="stamp" id="rsMsg"></div></div>
+    <div class="tile soft span2"><span class="fold"></span>
+      <div class="thead"><span class="grip"></span><h2 class="tt">Clean up</h2></div>
+      <p class="hint">You have <b>${n} ${n===1?'entry':'entries'}</b> logged. Saving never piles up copies — the app keeps one record and overwrites it, so storage stays tiny. The only thing that grows is your purchase log, and duplicates from double-tapping “Add” can be cleared in one go.</p>
+      <button class="btn ghost" id="dedupeBtn">Remove duplicate entries</button>
+      <div class="dangerzone">
+        <button class="btn danger" id="clearTx">Delete all entries</button>
+        <button class="btn danger" id="resetAll">Reset everything</button>
+      </div>
+      <div class="stamp" id="cuMsg"></div></div>
+  </div>`;
+  enter(v);
+  const msg=(id,t)=>{ const e=document.getElementById(id); if(e) e.innerHTML='<span class="live"></span>'+t; };
+  document.getElementById("copyBk").onclick=()=>{
+    const ta=document.getElementById("bkCode");
+    const done=()=>{ const b=document.getElementById("copyBk"); b.textContent="Copied!"; setTimeout(()=>b.textContent="Copy backup code",1600); };
+    if(navigator.clipboard&&navigator.clipboard.writeText){ navigator.clipboard.writeText(ta.value).then(done,()=>{ta.select();document.execCommand&&document.execCommand("copy");done();}); }
+    else { ta.select(); document.execCommand&&document.execCommand("copy"); done(); }
+  };
+  document.getElementById("dlBk").onclick=downloadBackup;
+  document.getElementById("rsBtn").onclick=()=>{
+    if(importData(document.getElementById("rsCode").value)){ renderHero(); msg("rsMsg","Restored. Opening your overview…"); setTimeout(()=>{state.tab="overview"; render();},700); }
+    else msg("rsMsg","That code didn't look right — check you copied the whole thing.");
+  };
+  document.getElementById("rsFile").onchange=e=>{
+    const f=e.target.files&&e.target.files[0]; if(!f) return;
+    const r=new FileReader(); r.onload=()=>{ if(importData(String(r.result))){ renderHero(); msg("rsMsg","Restored from file. Opening your overview…"); setTimeout(()=>{state.tab="overview"; render();},700); } else msg("rsMsg","Couldn't read that file."); };
+    r.readAsText(f);
+  };
+  document.getElementById("dedupeBtn").onclick=()=>{
+    const removed=dedupeTx(); renderHero();
+    msg("cuMsg", removed? `Removed ${removed} duplicate ${removed===1?'entry':'entries'}.` : "No duplicates found — you're clean.");
+  };
+  document.getElementById("clearTx").onclick=()=>{
+    if(!confirm("Delete all logged purchases? Your prices and Finnhub key stay. This can't be undone.")) return;
+    state.tx=[]; save("tx"); renderHero(); render();
+  };
+  document.getElementById("resetAll").onclick=()=>{
+    if(!confirm("Reset everything — purchases, prices, projections, and saved key? This can't be undone.")) return;
+    state.tx=[]; state.px={BTC:null,NVDA:null,updatedAt:null,source:null};
+    state.pj={BTC:{ret:20,contrib:50},NVDA:{ret:12,contrib:50}}; state.cfg={finnhubKey:""};
+    save("tx"); save("px"); save("pj"); save("cfg"); renderHero(); state.tab="overview"; render();
+  };
+}
+
 /* shell */
 function render(){
   if(!state.loaded){ document.getElementById("view").innerHTML='<div class="empty" style="color:var(--cream-mut)">Loading your data…</div>'; return; }
   renderHero();
   document.querySelectorAll("nav.tabs button").forEach(b=>b.setAttribute("aria-selected", b.dataset.tab===state.tab));
-  ({overview,activity,projections}[state.tab])();
+  ({overview,activity,projections,data:dataTab}[state.tab])();
 }
 document.querySelectorAll("nav.tabs button").forEach(b=>b.onclick=()=>{ state.tab=b.dataset.tab; render(); });
 load();
